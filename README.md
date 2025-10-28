@@ -9,6 +9,7 @@ This project is a Telegram bot that listens to messages in groups and sends mess
 - **Per-Group Configuration**: Assign different hashtags and email addresses to different groups.
 - **Admin Commands**: Only the designated admin can list groups and configure hashtags and email addresses.
 - **Startup Instructions**: The bot sends instructions to the admin when it starts.
+- **SQLite-Backed Persistence**: Group membership and configuration data are stored in a local SQLite database instead of JSON files.
 
 ## Prerequisites
 
@@ -84,6 +85,8 @@ python main.py
 ```
 
 Upon starting, the bot will send you (the admin) a message with instructions on how to use it.
+
+The bot automatically creates and maintains a `bot.db` SQLite database file in the project root to persist group details and configuration settings between restarts.
 
 ### 5. Add the Bot to Groups
 
