@@ -9,6 +9,7 @@ This project is a Telegram bot that listens to messages in groups and sends mess
 - **Per-Group Configuration**: Assign different hashtags and email addresses to different groups.
 - **Admin Commands**: Only the designated admin can list groups and configure hashtags and email addresses.
 - **Startup Instructions**: The bot sends instructions to the admin when it starts.
+- **SQLite-Backed Persistence**: Group membership and configuration data are stored in a local SQLite database instead of JSON files.
 
 ## Prerequisites
 
@@ -71,6 +72,9 @@ Replace the placeholder values with your actual credentials:
 - **SMTP_PORT**: The SMTP port (usually `587` for TLS).
 - **EMAIL_ADDRESS**: Your email address from which the messages will be sent.
 - **EMAIL_PASSWORD**: The password for your email account (or app-specific password if 2FA is enabled).
+ - **EMAIL_PASSWORD**: The password for your email account.
+
+For Gmail users with 2-Step Verification enabled, generate an App Password at https://myaccount.google.com/apppasswords and use that value for `EMAIL_PASSWORD` in your `.env`. Do not use your main Google account password.
 - **ADMIN_USER_ID**: Your Telegram user ID (the bot admin).
 
 **Note**: To find your Telegram user ID, you can use a bot like [@userinfobot](https://t.me/useridbot). Start a chat with the bot, and it will tell you your user ID.
@@ -80,10 +84,12 @@ Replace the placeholder values with your actual credentials:
 Run the Python script:
 
 ```bash
-python main.py
+python bot.py
 ```
 
 Upon starting, the bot will send you (the admin) a message with instructions on how to use it.
+
+The bot automatically creates and maintains a `bot.db` SQLite database file in the project root to persist group details and configuration settings between restarts.
 
 ### 5. Add the Bot to Groups
 
@@ -391,7 +397,7 @@ Since Windows services don't have an interactive console, you can redirect the b
 - **Persistent Storage**: The bot stores group and configuration data in `groups.json` and `group_configs.json`.
 - **Security**:
   - **Do Not Share Your `.env` File**: Ensure that the `.env` file is listed in `.gitignore` to prevent it from being pushed to any public repositories.
-  - **Email Security**: Use app-specific passwords if your email provider supports two-factor authentication.
+  - **Email Security**: Use app-specific passwords if your email provider supports two-factor authentication. For Gmail, create one at https://myaccount.google.com/apppasswords and store it as `EMAIL_PASSWORD` in your `.env` instead of your real Google account password.
 - **Bot Permissions**: The bot does not require admin permissions in groups but needs to be able to read messages to detect hashtags.
 - **Firewall Settings**:
   - Ensure that your server allows outbound connections on the SMTP port (`587`) to send emails.

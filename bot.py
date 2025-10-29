@@ -12,7 +12,8 @@ import smtplib
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 import os
-import json
+import sqlite3
+from contextlib import contextmanager
 
 load_dotenv()
 
@@ -23,30 +24,99 @@ EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
 ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID'))  # Admin's Telegram user ID
 
-# Data files
-GROUPS_FILE = 'groups.json'
-CONFIG_FILE = 'group_configs.json'
+# Database configuration
+DB_FILE = 'bot.db'
 
-# Load groups_seen and group_configs from files
-if os.path.exists(GROUPS_FILE):
-  with open(GROUPS_FILE, 'r') as f:
-    groups_seen = json.load(f)
-else:
-  groups_seen = {}  # {group_id: group_title}
 
-if os.path.exists(CONFIG_FILE):
-  with open(CONFIG_FILE, 'r') as f:
-    group_configs = json.load(f)
-else:
-  group_configs = {}  # {group_id: {'hashtag': ..., 'email_address': ...}}
+@contextmanager
+def get_db_connection():
+  conn = sqlite3.connect(DB_FILE)
+  conn.row_factory = sqlite3.Row
+  try:
+    yield conn
+    conn.commit()
+  finally:
+    conn.close()
 
-def save_groups():
-  with open(GROUPS_FILE, 'w') as f:
-    json.dump(groups_seen, f)
 
-def save_configs():
-  with open(CONFIG_FILE, 'w') as f:
-    json.dump(group_configs, f)
+def init_db():
+  with get_db_connection() as conn:
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS groups (
+        group_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL
+      )
+      """
+    )
+    conn.execute(
+      """
+      CREATE TABLE IF NOT EXISTS group_configs (
+        group_id TEXT PRIMARY KEY,
+        hashtag TEXT NOT NULL,
+        email_address TEXT NOT NULL,
+        FOREIGN KEY (group_id) REFERENCES groups (group_id) ON DELETE CASCADE
+      )
+      """
+    )
+
+
+def upsert_group(group_id: str, title: str):
+  with get_db_connection() as conn:
+    conn.execute(
+      "INSERT INTO groups (group_id, title) VALUES (?, ?) "
+      "ON CONFLICT(group_id) DO UPDATE SET title = excluded.title",
+      (group_id, title)
+    )
+
+
+def delete_group(group_id: str):
+  with get_db_connection() as conn:
+    conn.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
+
+
+def get_group(group_id: str):
+  with get_db_connection() as conn:
+    cursor = conn.execute(
+      "SELECT group_id, title FROM groups WHERE group_id = ?",
+      (group_id,)
+    )
+    return cursor.fetchone()
+
+
+def get_groups():
+  with get_db_connection() as conn:
+    cursor = conn.execute("SELECT group_id, title FROM groups ORDER BY title")
+    return cursor.fetchall()
+
+
+def group_exists(group_id: str) -> bool:
+  with get_db_connection() as conn:
+    cursor = conn.execute("SELECT 1 FROM groups WHERE group_id = ?", (group_id,))
+    return cursor.fetchone() is not None
+
+
+def upsert_group_config(group_id: str, hashtag: str, email_address: str):
+  with get_db_connection() as conn:
+    conn.execute(
+      "INSERT INTO group_configs (group_id, hashtag, email_address) VALUES (?, ?, ?) "
+      "ON CONFLICT(group_id) DO UPDATE SET hashtag = excluded.hashtag, email_address = excluded.email_address",
+      (group_id, hashtag, email_address)
+    )
+
+
+def delete_group_config(group_id: str):
+  with get_db_connection() as conn:
+    conn.execute("DELETE FROM group_configs WHERE group_id = ?", (group_id,))
+
+
+def get_group_config(group_id: str):
+  with get_db_connection() as conn:
+    cursor = conn.execute(
+      "SELECT hashtag, email_address FROM group_configs WHERE group_id = ?",
+      (group_id,)
+    )
+    return cursor.fetchone()
 
 def send_email(subject, body, to_email_address):
   msg = MIMEText(body)
@@ -71,15 +141,14 @@ async def message_handler(update: Update, context: CallbackContext):
 
   # Check if group has a configured hashtag and email address
   group_id = str(chat.id)
-  if group_id in group_configs:
-    config = group_configs[group_id]
-    hashtag = config.get('hashtag')
-    to_email_address = config.get('email_address')
-    if hashtag and to_email_address:
-      if hashtag.lower() in message.lower():
-        subject = f"New message from {sender} in Telegram Group ({chat.title})"
-        body = f"Sender: {sender}\n\nMessage: {message}"
-        send_email(subject, body, to_email_address)
+  config = get_group_config(group_id)
+  if config:
+    hashtag = config['hashtag']
+    to_email_address = config['email_address']
+    if hashtag and to_email_address and hashtag.lower() in message.lower():
+      subject = f"New message from {sender} in Telegram Group ({chat.title})"
+      body = f"Sender: {sender}\n\nMessage: {message}"
+      send_email(subject, body, to_email_address)
 
 # Updated handler for chat member updates
 async def chat_member_handler(update: Update, context: CallbackContext):
@@ -91,22 +160,22 @@ async def chat_member_handler(update: Update, context: CallbackContext):
   if new_status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR]:
     group_id = str(chat.id)
     group_title = chat.title
-    if group_id not in groups_seen:
-      groups_seen[group_id] = group_title
-      save_groups()
+    already_known = group_exists(group_id)
+    upsert_group(group_id, group_title)
+    if not already_known:
       print(f"Bot added to group {group_title} (ID: {group_id})")
   # Check if the bot was removed from a group
   elif new_status in [ChatMemberStatus.RESTRICTED, ChatMemberStatus.LEFT]:
     group_id = str(chat.id)
-    group_title = groups_seen.get(group_id, "Unknown Group")
-    if group_id in groups_seen:
-      del groups_seen[group_id]
-      save_groups()
+    group_row = get_group(group_id)
+    group_title = group_row['title'] if group_row else "Unknown Group"
+    config = get_group_config(group_id)
+    if group_row:
+      delete_group(group_id)
       print(f"Bot removed from group {group_title} (ID: {group_id})")
     # Remove the group's configurations
-    if group_id in group_configs:
-      del group_configs[group_id]
-      save_configs()
+    if config:
+      delete_group_config(group_id)
       print(f"Configuration for group {group_title} (ID: {group_id}) has been deleted.")
     # Optionally, notify the admin
     try:
@@ -125,10 +194,11 @@ async def list_groups(update: Update, context: CallbackContext):
     await update.message.reply_text("You are not authorized to use this command.")
     return
 
-  if groups_seen:
+  groups = get_groups()
+  if groups:
     response = "Groups the bot is in:\n"
-    for group_id, group_title in groups_seen.items():
-      response += f"ID: {group_id}, Title: {group_title}\n"
+    for group in groups:
+      response += f"ID: {group['group_id']}, Title: {group['title']}\n"
   else:
     response = "No groups found."
   await update.message.reply_text(response)
@@ -148,15 +218,11 @@ async def set_config(update: Update, context: CallbackContext):
   hashtag = args[1]
   email_address = args[2]
 
-  if group_id not in groups_seen:
+  if not group_exists(group_id):
     await update.message.reply_text("Group ID not found in bot's group list.")
     return
 
-  group_configs[group_id] = {
-    'hashtag': hashtag,
-    'email_address': email_address
-  }
-  save_configs()
+  upsert_group_config(group_id, hashtag, email_address)
   await update.message.reply_text(f"Configuration set for group ID {group_id}.")
 
 async def start_command(update: Update, context: CallbackContext):
@@ -192,6 +258,7 @@ async def on_startup(application: Application):
     print(f"Failed to send startup message to admin: {e}")
 
 def main():
+  init_db()
   application = Application.builder().token(bot_token).post_init(on_startup).build()
 
   application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
